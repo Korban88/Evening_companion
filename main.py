@@ -1,7 +1,7 @@
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta, date
-from typing import Optional, List, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import List, Tuple
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
@@ -13,6 +13,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import settings
+from generator import (
+    generate_talk_reply, generate_support_reply, generate_motivation_reply
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS diary (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
   ts TEXT,
+  role TEXT,     -- user | assistant (для истории беседы)
   text TEXT
 );
 
@@ -91,18 +95,12 @@ async def get_mode(user_id: int) -> str:
         row = await cur.fetchone()
         return row[0] if row else "talk"
 
-# ================== БЕСЕДА (ДНЕВНИК) ==================
-def reflect_short(text: str) -> str:
-    t = " ".join(text.strip().split())
-    if len(t) > 180:
-        t = t[:180] + "…"
-    return f"Ты написал: «{t}». Что из этого важно сохранить на завтра?"
-
-async def diary_add(user_id: int, text: str):
+# ===== ДНЕВНИК/ИСТОРИЯ =====
+async def diary_add(user_id: int, role: str, text: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO diary(user_id, ts, text) VALUES(?,?,?)",
-            (user_id, datetime.utcnow().isoformat(), text.strip())
+            "INSERT INTO diary(user_id, ts, role, text) VALUES(?,?,?,?)",
+            (user_id, datetime.utcnow().isoformat(), role, text.strip())
         )
         await db.commit()
 
@@ -110,7 +108,7 @@ async def diary_summary(user_id: int) -> str:
     since = datetime.utcnow() - timedelta(days=1)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "SELECT ts, text FROM diary WHERE user_id=? AND ts>=? ORDER BY ts DESC",
+            "SELECT ts, text FROM diary WHERE user_id=? AND role='user' AND ts>=? ORDER BY ts DESC",
             (user_id, since.isoformat())
         )
         rows = await cur.fetchall()
@@ -125,69 +123,16 @@ async def diary_summary(user_id: int) -> str:
         bullets.append(f"{t} — {snippet}")
     return "Краткий дневник за сутки:\n" + "\n".join(bullets)
 
-# ================== ПОДДЕРЖКА ==================
-SUPPORT_TEMPLATES = [
-    "Ты важен. Даже если день тяжёлый, ты не один.",
-    "Сегодня ты сделал достаточно. Отдохни, это нормально.",
-    "Твоим чувствам есть место. Я рядом текстом, но по-настоящему.",
-    "Можно не успевать всё. Важно, что ты стараешься.",
-    "Береги себя. Маленький шаг к заботе о себе — уже движение."
-]
-
-async def support_phrase(user_id: int) -> str:
-    now = datetime.utcnow()
+async def recent_history_pairs(user_id: int, limit: int) -> List[Tuple[str, str]]:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT streak, last_ts FROM support_stats WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if not row:
-            streak = 1
-            await db.execute("INSERT INTO support_stats(user_id, streak, last_ts) VALUES(?,?,?)",
-                             (user_id, streak, now.isoformat()))
-        else:
-            streak, last_ts = row
-            if last_ts:
-                last = datetime.fromisoformat(last_ts)
-                if (now.date() - last.date()).days >= 1:
-                    streak += 1
-            else:
-                streak += 1
-            await db.execute("UPDATE support_stats SET streak=?, last_ts=? WHERE user_id=?",
-                             (streak, now.isoformat(), user_id))
-        await db.commit()
-    phrase = SUPPORT_TEMPLATES[hash((user_id, now.date())) % len(SUPPORT_TEMPLATES)]
-    return f"{phrase}\nСерия дней с заботой: {streak}"
-
-# ================== МОТИВАЦИЯ ==================
-MOTIVATION_TEMPLATES = [
-    "Начни с малого. Пять минут сегодня лучше, чем ноль завтра.",
-    "Сделай один простой шаг. Остальное подтянется.",
-    "Ты справишься. Результат любит регулярность.",
-    "Не обязательно идеально. Достаточно по-настоящему.",
-    "Выбери одну маленькую вещь и сделай её сейчас."
-]
-
-async def motivation_phrase(user_id: int) -> str:
-    now = datetime.utcnow()
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT streak, last_ts FROM motivate_stats WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        if not row:
-            streak = 1
-            await db.execute("INSERT INTO motivate_stats(user_id, streak, last_ts) VALUES(?,?,?)",
-                             (user_id, streak, now.isoformat()))
-        else:
-            streak, last_ts = row
-            if last_ts:
-                last = datetime.fromisoformat(last_ts)
-                if (now.date() - last.date()).days >= 1:
-                    streak += 1
-            else:
-                streak += 1
-            await db.execute("UPDATE motivate_stats SET streak=?, last_ts=? WHERE user_id=?",
-                             (streak, now.isoformat(), user_id))
-        await db.commit()
-    phrase = MOTIVATION_TEMPLATES[hash((user_id, now.date(), "m")) % len(MOTIVATION_TEMPLATES)]
-    return f"{phrase}\nДней с настроем: {streak}"
+        cur = await db.execute(
+            "SELECT role, text FROM diary WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (user_id, limit)
+        )
+        rows = await cur.fetchall()
+    # вернём в прямом порядке
+    rows = rows[::-1]
+    return [(r, t) for r, t in rows]
 
 # ================== ХЭНДЛЕРЫ ==================
 @dp.message(CommandStart())
@@ -213,15 +158,17 @@ async def mode_talk(m: Message):
 async def mode_support(m: Message):
     await ensure_user(m.from_user.id)
     await set_mode(m.from_user.id, "support")
-    txt = await support_phrase(m.from_user.id)
-    await m.answer("Режим Поддержка.\n" + txt, reply_markup=base_kb())
+    reply = await generate_support_reply("")
+    await diary_add(m.from_user.id, "assistant", reply)
+    await m.answer("Режим Поддержка.\n" + reply, reply_markup=base_kb())
 
 @dp.message(F.text.lower() == "мотивация")
 async def mode_motivate(m: Message):
     await ensure_user(m.from_user.id)
     await set_mode(m.from_user.id, "motivate")
-    txt = await motivation_phrase(m.from_user.id)
-    await m.answer("Режим Мотивация.\n" + txt, reply_markup=base_kb())
+    reply = await generate_motivation_reply(None)
+    await diary_add(m.from_user.id, "assistant", reply)
+    await m.answer("Режим Мотивация.\n" + reply, reply_markup=base_kb())
 
 @dp.message(F.text.lower() == "итог дня")
 @dp.message(Command("summary"))
@@ -233,11 +180,8 @@ async def summary_cmd(m: Message):
 @dp.message(Command("help"))
 async def help_cmd(m: Message):
     await m.answer(
-        "Режимы:\n"
-        "— Беседа: просто пиши, я отвечу и сохраню в дневник. «Итог дня» покажет последние записи.\n"
-        "— Поддержка: тёплые фразы, снижающие тревогу. Ведём серию заботы.\n"
-        "— Мотивация: короткие фразы, чтобы сдвинуться с места. Ведём серию настроя.\n"
-        "Кнопки снизу — для переключения."
+        "Пиши обычным текстом. Я запоминаю контекст недавних сообщений и отвечаю по-человечески.\n"
+        "Режимы переключаются кнопками снизу."
     )
 
 # Свободный текст
@@ -246,19 +190,26 @@ async def route_free_text(m: Message):
     await ensure_user(m.from_user.id)
     mode = await get_mode(m.from_user.id)
 
+    # сохраняем пользовательский текст
+    await diary_add(m.from_user.id, "user", m.text)
+
     if mode == "talk":
-        await diary_add(m.from_user.id, m.text)
-        await m.answer(reflect_short(m.text), reply_markup=base_kb())
+        history = await recent_history_pairs(m.from_user.id, settings.history_max_msgs)
+        reply = await generate_talk_reply(m.text, history)
+        await diary_add(m.from_user.id, "assistant", reply)
+        await m.answer(reply, reply_markup=base_kb())
         return
 
     if mode == "support":
-        txt = await support_phrase(m.from_user.id)
-        await m.answer(txt, reply_markup=base_kb())
+        reply = await generate_support_reply(m.text)
+        await diary_add(m.from_user.id, "assistant", reply)
+        await m.answer(reply, reply_markup=base_kb())
         return
 
     # motivate
-    txt = await motivation_phrase(m.from_user.id)
-    await m.answer(txt, reply_markup=base_kb())
+    reply = await generate_motivation_reply(m.text)
+    await diary_add(m.from_user.id, "assistant", reply)
+    await m.answer(reply, reply_markup=base_kb())
 
 # ================== ПЛАНИРОВЩИК ==================
 scheduler = AsyncIOScheduler()
@@ -272,11 +223,11 @@ async def daily_jobs():
             if mode == "talk":
                 await bot.send_message(uid, "Вечерний Собеседник. Хочешь итог дня? Нажми «Итог дня».")
             elif mode == "support":
-                txt = await support_phrase(uid)
-                await bot.send_message(uid, "Немного поддержки на вечер.\n" + txt)
+                reply = await generate_support_reply("")
+                await bot.send_message(uid, "Немного поддержки на вечер.\n" + reply)
             else:
-                txt = await motivation_phrase(uid)
-                await bot.send_message(uid, "Вечерний настрой.\n" + txt)
+                reply = await generate_motivation_reply(None)
+                await bot.send_message(uid, "Вечерний настрой.\n" + reply)
         except Exception as e:
             logging.warning(f"daily_jobs error for {uid}: {e}")
 
