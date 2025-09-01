@@ -1,12 +1,10 @@
+import os
 from dataclasses import dataclass
 
 @dataclass
 class Settings:
-    # Твой токен зашит сюда
-    bot_token: str = "8388331432:AAEgbIYU7RypeJckImvNqcwQ9vLXWR4iupw"
-    # Час по Москве для вечернего напоминания
-    daily_hour_msk: int = 20
-    # Имя файла БД
-    db_path: str = "sobesednik.db"
+    bot_token: str = os.getenv("BOT_TOKEN", "<<<FALLBACK>>>")
+    daily_hour_msk: int = int(os.getenv("DAILY_HOUR_MSK", "20"))
+    db_path: str = os.getenv("DB_PATH", "sobesednik.db")
 
 settings = Settings()
