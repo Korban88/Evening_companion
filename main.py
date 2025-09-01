@@ -6,13 +6,20 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import CommandStart, Command
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import settings
 
 logging.basicConfig(level=logging.INFO)
-bot = Bot(settings.bot_token, parse_mode="HTML")
+
+# ВАЖНО: aiogram 3.7 требует задавать parse_mode через DefaultBotProperties
+bot = Bot(
+    token=settings.bot_token,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
 
 DB_PATH = settings.db_path
@@ -92,7 +99,7 @@ async def get_mode(user_id: int) -> str:
 async def start(m: Message):
     await ensure_user(m.from_user.id)
     await m.answer(
-        "Добро пожаловать во <b>Вечерний Собеседник</b> 🌙\n\n"
+        "Добро пожаловать во <b>Вечерний Собеседник</b>\n\n"
         "Здесь можно:\n"
         "• Выговориться и сохранить мысли (Компаньон)\n"
         "• Ставить цели и получать напоминания (Дисциплина)\n"
@@ -148,11 +155,11 @@ async def daily_jobs():
     for uid, mode in users:
         try:
             if mode == "companion":
-                await bot.send_message(uid, "🌙 Вечерний Собеседник: хочешь итог дня? Напиши /summary.")
+                await bot.send_message(uid, "Вечерний Собеседник: хочешь итог дня? Напиши /summary.")
             elif mode == "discipline":
-                await bot.send_message(uid, "🌙 Напоминание: проверь свои цели (/goals).")
+                await bot.send_message(uid, "Напоминание: проверь свои цели (/goals).")
             else:
-                await bot.send_message(uid, "🌙 Забота о себе важна. Ты справляешься.")
+                await bot.send_message(uid, "Забота о себе важна. Ты справляешься.")
         except Exception as e:
             logging.warning(f"daily_jobs error for {uid}: {e}")
 
