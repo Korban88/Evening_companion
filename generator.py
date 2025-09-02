@@ -90,7 +90,7 @@ def _detect_topic(text: str) -> str:
     t = text.lower().strip()
     if any(w in t for w in ["привет","здрав","добрый","ку","hi","hello"]):
         return "greet"
-    if any(w in t for w in ["как у тебя","как дела","как сам","как сама"]):
+    if any(w in t for w in ["как у тебя","как дела","как сам","как сама","как тебе","как там"]):
         return "ask_me"
     if any(w in t for w in ["ты кто","кто ты","что ты","кто такой"]):
         return "who"
@@ -98,6 +98,10 @@ def _detect_topic(text: str) -> str:
         return "ask_clarify"
     if any(w in t for w in ["не ответил","не ответила","ответь на вопрос","ты не ответил"]):
         return "complain_no_answer"
+    if any(w in t for w in ["заглушк"]):
+        return "stub_accusation"
+    if any(w in t for w in ["норм","нормально","ок","окей","ага","ясно","понял","понятно"]):
+        return "ack"
     if any(w in t for w in ["устал","устала","выгор","не могу","надоело"]):
         return "tired"
     if any(w in t for w in ["посор","конфликт","отношен","друг","парн","девуш","семь","муж","жена"]):
@@ -146,10 +150,17 @@ def talk_fallback(
         ])
     if topic == "ask_clarify":
         base = _reflect_from_prev(prev_user_text)
-        return base + " Если сформулировал расплывчато — уточни, о чём тебе хочется поговорить?"
+        return base + " Если расплывчато сформулировал — уточни, о чём именно хочется поговорить?"
     if topic == "complain_no_answer":
         base = _reflect_from_prev(prev_user_text)
-        return base + " Сори, что ушёл в сторону. Спроси ещё раз — я отвечу прямо."
+        return base + " Прости, что ушёл в сторону. Спроси ещё раз — отвечу прямо."
+    if topic == "stub_accusation":
+        return "Не заглушки. Я отвечаю своими фразами. Скажи, как тебе привычнее общаться — подстроюсь."
+    if topic == "ack":
+        return random.choice([
+            "Окей. Хочешь развить тему или сменим её?",
+            "Понял. Продолжим про это или поговорим о чём-то другом?"
+        ])
     if topic == "short":
         return random.choice([
             "Я здесь. Расскажи, что у тебя на душе.",
@@ -184,14 +195,14 @@ def talk_fallback(
     if sent == "pos":
         return random.choice([
             "Звучит радостно. Что особенно порадовало тебя в этом?",
-            "Классно слышать. Что из этого хочется сохранить в жизни чаще?"
+            "Классно слышать. Что из этого хочется сохранять чаще?"
         ])
     return random.choice([
         "Слышу тебя. Что в этом для тебя главное?",
         "Понимаю. Расскажи немного подробнее, что тебя в этом волнует?"
     ])
 
-# ---------- Вызов LLM с ретраями ----------
+# ---------- LLM с ретраями ----------
 async def llm_generate_talk(user_text: str, history_pairs: List[Tuple[str, str]]) -> Optional[str]:
     if settings.llm_provider == "none":
         return None
