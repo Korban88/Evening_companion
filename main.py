@@ -27,7 +27,6 @@ dp = Dispatcher()
 
 DB_PATH = settings.db_path
 
-# ================== БАЗА ДАННЫХ ==================
 CREATE_SQL = """
 PRAGMA journal_mode=WAL;
 
@@ -41,7 +40,7 @@ CREATE TABLE IF NOT EXISTS diary (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
   ts TEXT,
-  role TEXT,     -- user | assistant (для истории беседы)
+  role TEXT,     -- user | assistant
   text TEXT
 );
 
@@ -63,7 +62,6 @@ async def init_db():
         await db.executescript(CREATE_SQL)
         await db.commit()
 
-# ================== КЛАВИАТУРЫ ==================
 def base_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -73,7 +71,6 @@ def base_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-# ================== УТИЛИТЫ ПОЛЬЗОВАТЕЛЯ ==================
 async def ensure_user(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,))
@@ -95,7 +92,6 @@ async def get_mode(user_id: int) -> str:
         row = await cur.fetchone()
         return row[0] if row else "talk"
 
-# ===== ДНЕВНИК/ИСТОРИЯ =====
 async def diary_add(user_id: int, role: str, text: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -130,18 +126,16 @@ async def recent_history_pairs(user_id: int, limit: int) -> List[Tuple[str, str]
             (user_id, limit)
         )
         rows = await cur.fetchall()
-    # вернём в прямом порядке
     rows = rows[::-1]
     return [(r, t) for r, t in rows]
 
-# ================== ХЭНДЛЕРЫ ==================
 @dp.message(CommandStart())
 async def start(m: Message):
     await ensure_user(m.from_user.id)
     await m.answer(
         "Добро пожаловать во <b>Вечерний Собеседник</b>\n\n"
         "Режимы:\n"
-        "• Беседа — говори, я слышу и сохраняю в дневник\n"
+        "• Беседа — живой разговор на уровне друга\n"
         "• Поддержка — тёплые слова, когда тяжело\n"
         "• Мотивация — короткий заряд на действие\n\n"
         "Выбери режим или просто напиши.",
@@ -184,13 +178,10 @@ async def help_cmd(m: Message):
         "Режимы переключаются кнопками снизу."
     )
 
-# Свободный текст
 @dp.message(F.text, ~F.text.startswith("/"))
 async def route_free_text(m: Message):
     await ensure_user(m.from_user.id)
     mode = await get_mode(m.from_user.id)
-
-    # сохраняем пользовательский текст
     await diary_add(m.from_user.id, "user", m.text)
 
     if mode == "talk":
@@ -206,12 +197,10 @@ async def route_free_text(m: Message):
         await m.answer(reply, reply_markup=base_kb())
         return
 
-    # motivate
     reply = await generate_motivation_reply(m.text)
     await diary_add(m.from_user.id, "assistant", reply)
     await m.answer(reply, reply_markup=base_kb())
 
-# ================== ПЛАНИРОВЩИК ==================
 scheduler = AsyncIOScheduler()
 
 async def daily_jobs():
