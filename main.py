@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple, Optional
 
@@ -8,7 +9,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import CommandStart, Command
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatAction
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -130,14 +131,9 @@ async def recent_history_pairs(user_id: int, limit: int) -> List[Tuple[str, str]
     return [(r, t) for r, t in rows]
 
 def extract_prev_messages(history: List[Tuple[str, str]]) -> tuple[Optional[str], Optional[str]]:
-    """
-    Возвращает (предыдущий_текст_пользователя, последний_ответ_ассистента) из истории до текущего сообщения.
-    История уже включает текущий user-текст (мы добавляем его в diary до генерации ответа),
-    поэтому берём всё до последнего элемента.
-    """
     if not history:
         return None, None
-    trimmed = history[:-1]  # исключаем текущий user-текст
+    trimmed = history[:-1]  # исключаем текущее user-сообщение
     prev_user = None
     last_assistant = None
     for role, text in reversed(trimmed):
@@ -148,6 +144,10 @@ def extract_prev_messages(history: List[Tuple[str, str]]) -> tuple[Optional[str]
         if prev_user is not None and last_assistant is not None:
             break
     return prev_user, last_assistant
+
+async def appear_typing(chat_id: int, min_s=0.6, max_s=1.4):
+    await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    await asyncio.sleep(random.uniform(min_s, max_s))
 
 @dp.message(CommandStart())
 async def start(m: Message):
@@ -174,6 +174,7 @@ async def mode_support(m: Message):
     await set_mode(m.from_user.id, "support")
     reply = await generate_support_reply("")
     await diary_add(m.from_user.id, "assistant", reply)
+    await appear_typing(m.chat.id)
     await m.answer("Режим Поддержка.\n" + reply, reply_markup=base_kb())
 
 @dp.message(F.text.lower() == "мотивация")
@@ -182,6 +183,7 @@ async def mode_motivate(m: Message):
     await set_mode(m.from_user.id, "motivate")
     reply = await generate_motivation_reply(None)
     await diary_add(m.from_user.id, "assistant", reply)
+    await appear_typing(m.chat.id)
     await m.answer("Режим Мотивация.\n" + reply, reply_markup=base_kb())
 
 @dp.message(F.text.lower() == "итог дня")
@@ -209,17 +211,20 @@ async def route_free_text(m: Message):
         prev_user, last_assistant = extract_prev_messages(history)
         reply = await generate_talk_reply(m.text, history, prev_user, last_assistant)
         await diary_add(m.from_user.id, "assistant", reply)
+        await appear_typing(m.chat.id)
         await m.answer(reply, reply_markup=base_kb())
         return
 
     if mode == "support":
         reply = await generate_support_reply(m.text)
         await diary_add(m.from_user.id, "assistant", reply)
+        await appear_typing(m.chat.id)
         await m.answer(reply, reply_markup=base_kb())
         return
 
     reply = await generate_motivation_reply(m.text)
     await diary_add(m.from_user.id, "assistant", reply)
+    await appear_typing(m.chat.id)
     await m.answer(reply, reply_markup=base_kb())
 
 scheduler = AsyncIOScheduler()
