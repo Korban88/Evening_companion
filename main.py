@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
@@ -129,6 +129,26 @@ async def recent_history_pairs(user_id: int, limit: int) -> List[Tuple[str, str]
     rows = rows[::-1]
     return [(r, t) for r, t in rows]
 
+def extract_prev_messages(history: List[Tuple[str, str]]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Возвращает (предыдущий_текст_пользователя, последний_ответ_ассистента) из истории до текущего сообщения.
+    История уже включает текущий user-текст (мы добавляем его в diary до генерации ответа),
+    поэтому берём всё до последнего элемента.
+    """
+    if not history:
+        return None, None
+    trimmed = history[:-1]  # исключаем текущий user-текст
+    prev_user = None
+    last_assistant = None
+    for role, text in reversed(trimmed):
+        if last_assistant is None and role == "assistant":
+            last_assistant = text
+        if prev_user is None and role == "user":
+            prev_user = text
+        if prev_user is not None and last_assistant is not None:
+            break
+    return prev_user, last_assistant
+
 @dp.message(CommandStart())
 async def start(m: Message):
     await ensure_user(m.from_user.id)
@@ -186,7 +206,8 @@ async def route_free_text(m: Message):
 
     if mode == "talk":
         history = await recent_history_pairs(m.from_user.id, settings.history_max_msgs)
-        reply = await generate_talk_reply(m.text, history)
+        prev_user, last_assistant = extract_prev_messages(history)
+        reply = await generate_talk_reply(m.text, history, prev_user, last_assistant)
         await diary_add(m.from_user.id, "assistant", reply)
         await m.answer(reply, reply_markup=base_kb())
         return
