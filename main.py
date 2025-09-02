@@ -77,7 +77,7 @@ async def ensure_user(user_id: int):
         if not await cur.fetchone():
             await db.execute(
                 "INSERT INTO users(user_id, mode, created_at) VALUES(?,?,?)",
-                (user_id, "talk", datetime.utcnow().isoformat())
+                (user_id, "talk", datetime.now(timezone.utc).isoformat())
             )
             await db.commit()
 
@@ -96,12 +96,12 @@ async def diary_add(user_id: int, role: str, text: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO diary(user_id, ts, role, text) VALUES(?,?,?,?)",
-            (user_id, datetime.utcnow().isoformat(), role, text.strip())
+            (user_id, datetime.now(timezone.utc).isoformat(), role, text.strip())
         )
         await db.commit()
 
 async def diary_summary(user_id: int) -> str:
-    since = datetime.utcnow() - timedelta(days=1)
+    since = datetime.now(timezone.utc) - timedelta(days=1)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT ts, text FROM diary WHERE user_id=? AND role='user' AND ts>=? ORDER BY ts DESC",
