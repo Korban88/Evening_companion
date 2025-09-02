@@ -85,7 +85,7 @@ def tmpl_motivation() -> str:
     }
     return random.choice(lines.get(tod, lines["день"]))
 
-# ---------- Беседа: живая логика ----------
+# ---------- Беседа: живая логика с учётом контекста ----------
 def _detect_topic(text: str) -> str:
     t = text.lower().strip()
     if any(w in t for w in ["привет","здрав","добрый","ку","hi","hello"]):
@@ -94,6 +94,10 @@ def _detect_topic(text: str) -> str:
         return "ask_me"
     if any(w in t for w in ["ты кто","кто ты","что ты","кто такой"]):
         return "who"
+    if any(w in t for w in ["что понимаешь","что ты понимаешь","что именно понимаешь"]):
+        return "ask_clarify"
+    if any(w in t for w in ["не ответил","не ответила","ответь на вопрос","ты не ответил"]):
+        return "complain_no_answer"
     if any(w in t for w in ["устал","устала","выгор","не могу","надоело"]):
         return "tired"
     if any(w in t for w in ["посор","конфликт","отношен","друг","парн","девуш","семь","муж","жена"]):
@@ -106,10 +110,25 @@ def _detect_topic(text: str) -> str:
         return "short"
     return "generic"
 
-def talk_fallback(user_text: str) -> str:
+def _reflect_from_prev(prev_user: Optional[str]) -> str:
+    if not prev_user:
+        return "Понял."
+    s = detect_sentiment(prev_user)
+    if s == "neg":
+        return "Понимаю, что было непросто."
+    if s == "pos":
+        return "Понимаю, что это порадовало тебя."
+    return "Понимаю тебя."
+
+def talk_fallback(
+    user_text: str,
+    prev_user_text: Optional[str],
+    last_assistant_text: Optional[str]
+) -> str:
     sent = detect_sentiment(user_text)
     topic = _detect_topic(user_text)
     random.seed(f"talk-{topic}-{datetime.now(timezone.utc).minute}")
+
     if topic == "greet":
         return random.choice([
             "Привет. Как тебе этот день?",
@@ -117,14 +136,20 @@ def talk_fallback(user_text: str) -> str:
         ])
     if topic == "ask_me":
         return random.choice([
-            "Я на связи и слушаю. А что у тебя происходит?",
-            "У меня всё стабильно. Давай лучше про тебя — что важно сейчас?"
+            "Я в порядке и на связи. Давай лучше про тебя — что важно сейчас?",
+            "У меня стабильно. Что у тебя происходит прямо сейчас?"
         ])
     if topic == "who":
         return random.choice([
             "Я «Вечерний Собеседник» — тот, кто слушает и отвечает по-человечески. О чём хочешь поговорить?",
             "Я здесь, чтобы быть рядом словом. Можем обсудить что угодно. С чего начнём?"
         ])
+    if topic == "ask_clarify":
+        base = _reflect_from_prev(prev_user_text)
+        return base + " Если сформулировал расплывчато — уточни, о чём тебе хочется поговорить?"
+    if topic == "complain_no_answer":
+        base = _reflect_from_prev(prev_user_text)
+        return base + " Сори, что ушёл в сторону. Спроси ещё раз — я отвечу прямо."
     if topic == "short":
         return random.choice([
             "Я здесь. Расскажи, что у тебя на душе.",
@@ -150,10 +175,11 @@ def talk_fallback(user_text: str) -> str:
             "Тело и сон многое решают. Как ты себя чувствуешь прямо сейчас?",
             "Здоровье — первично. Что именно беспокоит больше всего?"
         ])
+
     if sent == "neg":
         return random.choice([
-            "Понимаю, что непросто. Что в этом для тебя самое тяжёлое?",
-            "Звучит тяжело. Что хотелось бы изменить в первую очередь?"
+            "Звучит тяжело. Что в этом для тебя самое сложное?",
+            "Понимаю, что непросто. Что хотелось бы изменить в первую очередь?"
         ])
     if sent == "pos":
         return random.choice([
@@ -250,11 +276,16 @@ async def _call_llm(user_prompt: str, system_prompt: str) -> Optional[str]:
     return None
 
 # ---------- Публичные функции ----------
-async def generate_talk_reply(user_text: str, recent_history: List[Tuple[str, str]]) -> str:
+async def generate_talk_reply(
+    user_text: str,
+    recent_history: List[Tuple[str, str]],
+    prev_user_text: Optional[str],
+    last_assistant_text: Optional[str]
+) -> str:
     llm = await llm_generate_talk(user_text, recent_history)
     if llm:
         return llm
-    return talk_fallback(user_text)
+    return talk_fallback(user_text, prev_user_text, last_assistant_text)
 
 async def generate_support_reply(user_text: str) -> str:
     sent = detect_sentiment(user_text)
