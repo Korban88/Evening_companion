@@ -1,9 +1,14 @@
 import asyncio
+import logging
 import random
 import httpx
+from asyncio import Semaphore
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple, Optional, Literal
 from config import settings
+
+# глобальный семафор — ограничиваем одновременные вызовы к GPT
+_LLM_SEM = Semaphore(settings.llm_max_concurrency)
 
 Sentiment = Literal["neg", "neu", "pos"]
 
@@ -20,21 +25,16 @@ def detect_sentiment(text: str) -> Sentiment:
     low = text.lower()
     neg = any(m in low for m in NEG_MARKERS)
     pos = any(m in low for m in POS_MARKERS)
-    if neg and not pos:
-        return "neg"
-    if pos and not neg:
-        return "pos"
+    if neg and not pos: return "neg"
+    if pos and not neg: return "pos"
     return "neu"
 
 def time_of_day_msk() -> str:
     now = datetime.now(timezone.utc) + timedelta(hours=3)
     h = now.hour
-    if 6 <= h < 12:
-        return "утро"
-    if 12 <= h < 18:
-        return "день"
-    if 18 <= h < 24:
-        return "вечер"
+    if 6 <= h < 12: return "утро"
+    if 12 <= h < 18: return "день"
+    if 18 <= h < 24: return "вечер"
     return "ночь"
 
 # ---------- Поддержка ----------
@@ -85,124 +85,73 @@ def tmpl_motivation() -> str:
     }
     return random.choice(lines.get(tod, lines["день"]))
 
-# ---------- Беседа: живая логика с учётом контекста ----------
+# ---------- Беседа: живая логика с темами (в т. ч. музыка/песня/гармония) ----------
 def _detect_topic(text: str) -> str:
     t = text.lower().strip()
-    if any(w in t for w in ["привет","здрав","добрый","ку","hi","hello"]):
-        return "greet"
-    if any(w in t for w in ["как у тебя","как дела","как сам","как сама","как тебе","как там"]):
-        return "ask_me"
-    if any(w in t for w in ["ты кто","кто ты","что ты","кто такой"]):
-        return "who"
-    if any(w in t for w in ["что понимаешь","что ты понимаешь","что именно понимаешь"]):
-        return "ask_clarify"
-    if any(w in t for w in ["не ответил","не ответила","ответь на вопрос","ты не ответил"]):
-        return "complain_no_answer"
-    if any(w in t for w in ["заглушк"]):
-        return "stub_accusation"
-    if any(w in t for w in ["норм","нормально","ок","окей","ага","ясно","понял","понятно"]):
-        return "ack"
-    if any(w in t for w in ["устал","устала","выгор","не могу","надоело"]):
-        return "tired"
-    if any(w in t for w in ["посор","конфликт","отношен","друг","парн","девуш","семь","муж","жена"]):
-        return "relations"
-    if any(w in t for w in ["работ","началь","проект","срок","отчёт","учёб","экзам"]):
-        return "work"
-    if any(w in t for w in ["болит","боль","здоров","сон","бессон","тревог"]):
-        return "health"
-    if len(t) <= 8:
-        return "short"
+    if any(w in t for w in ["привет","здрав","добрый","ку","hi","hello"]): return "greet"
+    if any(w in t for w in ["как у тебя","как дела","как сам","как сама","как тебе","как там"]): return "ask_me"
+    if any(w in t for w in ["ты кто","кто ты","что ты","кто такой"]): return "who"
+    if any(w in t for w in ["что понимаешь","что ты понимаешь","что именно понимаешь"]): return "ask_clarify"
+    if any(w in t for w in ["не ответил","не ответила","ответь на вопрос","ты не ответил"]): return "complain_no_answer"
+    if any(w in t for w in ["заглушк"]): return "stub_accusation"
+    if any(w in t for w in ["норм","нормально","ок","окей","ага","ясно","понял","понятно"]): return "ack"
+    if any(w in t for w in ["песн","музык","аккорд","гармони","риф","куплет","припев","текст песни"]): return "music"
+    if any(w in t for w in ["устал","устала","выгор","не могу","надоело"]): return "tired"
+    if any(w in t for w in ["посор","конфликт","отношен","друг","парн","девуш","семь","муж","жена"]): return "relations"
+    if any(w in t for w in ["работ","началь","проект","срок","отчёт","учёб","экзам"]): return "work"
+    if any(w in t for w in ["болит","боль","здоров","сон","бессон","тревог"]): return "health"
+    if len(t) <= 8: return "short"
     return "generic"
 
 def _reflect_from_prev(prev_user: Optional[str]) -> str:
-    if not prev_user:
-        return "Понял."
+    if not prev_user: return "Понял."
     s = detect_sentiment(prev_user)
-    if s == "neg":
-        return "Понимаю, что было непросто."
-    if s == "pos":
-        return "Понимаю, что это порадовало тебя."
+    if s == "neg": return "Понимаю, что было непросто."
+    if s == "pos": return "Понимаю, что это порадовало тебя."
     return "Понимаю тебя."
 
-def talk_fallback(
-    user_text: str,
-    prev_user_text: Optional[str],
-    last_assistant_text: Optional[str]
-) -> str:
+def talk_fallback(user_text: str, prev_user_text: Optional[str], last_assistant_text: Optional[str]) -> str:
     sent = detect_sentiment(user_text)
     topic = _detect_topic(user_text)
     random.seed(f"talk-{topic}-{datetime.now(timezone.utc).minute}")
 
     if topic == "greet":
-        return random.choice([
-            "Привет. Как тебе этот день?",
-            "Рад слышать. Что сейчас у тебя на душе?"
-        ])
+        return random.choice(["Привет. Как тебе этот день?", "Рад слышать. Что сейчас у тебя на душе?"])
     if topic == "ask_me":
-        return random.choice([
-            "Я в порядке и на связи. Давай лучше про тебя — что важно сейчас?",
-            "У меня стабильно. Что у тебя происходит прямо сейчас?"
-        ])
+        return random.choice(["Я в порядке и на связи. Давай лучше про тебя — что важно сейчас?", "У меня стабильно. Что у тебя происходит прямо сейчас?"])
     if topic == "who":
-        return random.choice([
-            "Я «Вечерний Собеседник» — тот, кто слушает и отвечает по-человечески. О чём хочешь поговорить?",
-            "Я здесь, чтобы быть рядом словом. Можем обсудить что угодно. С чего начнём?"
-        ])
+        return random.choice(["Я «Вечерний Собеседник» — тот, кто слушает и отвечает по-человечески. О чём хочешь поговорить?", "Я здесь, чтобы быть рядом словом. С чего начнём?"])
     if topic == "ask_clarify":
-        base = _reflect_from_prev(prev_user_text)
-        return base + " Если расплывчато сформулировал — уточни, о чём именно хочется поговорить?"
+        return _reflect_from_prev(prev_user_text) + " Если расплывчато сформулировал — уточни, о чём именно хочется поговорить?"
     if topic == "complain_no_answer":
-        base = _reflect_from_prev(prev_user_text)
-        return base + " Прости, что ушёл в сторону. Спроси ещё раз — отвечу прямо."
+        return _reflect_from_prev(prev_user_text) + " Прости, что ушёл в сторону. Спроси ещё раз — отвечу прямо."
     if topic == "stub_accusation":
         return "Не заглушки. Я отвечаю своими фразами. Скажи, как тебе привычнее общаться — подстроюсь."
     if topic == "ack":
+        return random.choice(["Окей. Хочешь развить тему или сменим её?", "Понял. Продолжим про это или поговорим о чём-то другом?"])
+    if topic == "music":
         return random.choice([
-            "Окей. Хочешь развить тему или сменим её?",
-            "Понял. Продолжим про это или поговорим о чём-то другом?"
+            "Круто. Про что песня и в каком настроении её хочешь сделать?",
+            "Гармония — про атмосферу. Ты сейчас про аккорды или про общее звучание? Какой жанр думаешь?"
         ])
     if topic == "short":
-        return random.choice([
-            "Я здесь. Расскажи, что у тебя на душе.",
-            "Слушаю. О чём хочешь поговорить?"
-        ])
+        return random.choice(["Я здесь. Расскажи, что у тебя на душе.", "Слушаю. О чём хочешь поговорить?"])
     if topic == "tired":
-        return random.choice([
-            "Слышу усталость. Что сильнее всего выматывает тебя сейчас?",
-            "Похоже, сил маловато. Что больше всего давит?"
-        ])
+        return random.choice(["Слышу усталость. Что сильнее всего выматывает тебя сейчас?", "Похоже, сил маловато. Что больше всего давит?"])
     if topic == "relations":
-        return random.choice([
-            "Отношения — это важно. Что именно задело больше всего в этой ситуации?",
-            "Понимаю, это может ранить. Что хочешь прояснить в этом разговоре?"
-        ])
+        return random.choice(["Отношения — это важно. Что именно задело больше всего в этой ситуации?", "Понимаю, это может ранить. Что хочешь прояснить в этом разговоре?"])
     if topic == "work":
-        return random.choice([
-            "Рабочие дела умеют давить. Что сейчас основная трудность для тебя?",
-            "Похоже на напряжение из-за дел. Что мешает больше всего?"
-        ])
+        return random.choice(["Рабочие дела умеют давить. Что сейчас основная трудность для тебя?", "Похоже на напряжение из-за дел. Что мешает больше всего?"])
     if topic == "health":
-        return random.choice([
-            "Тело и сон многое решают. Как ты себя чувствуешь прямо сейчас?",
-            "Здоровье — первично. Что именно беспокоит больше всего?"
-        ])
+        return random.choice(["Тело и сон многое решают. Как ты себя чувствуешь прямо сейчас?", "Здоровье — первично. Что именно беспокоит больше всего?"])
 
     if sent == "neg":
-        return random.choice([
-            "Звучит тяжело. Что в этом для тебя самое сложное?",
-            "Понимаю, что непросто. Что хотелось бы изменить в первую очередь?"
-        ])
+        return random.choice(["Звучит тяжело. Что в этом для тебя самое сложное?", "Понимаю, что непросто. Что хотелось бы изменить в первую очередь?"])
     if sent == "pos":
-        return random.choice([
-            "Звучит радостно. Что особенно порадовало тебя в этом?",
-            "Классно слышать. Что из этого хочется сохранять чаще?"
-        ])
-    return random.choice([
-        "Слышу тебя. Что в этом для тебя главное?",
-        "Понимаю. Расскажи немного подробнее, что тебя в этом волнует?"
-    ])
+        return random.choice(["Звучит радостно. Что особенно порадовало тебя в этом?", "Классно слышать. Что из этого хочется сохранять чаще?"])
+    return random.choice(["Слышу тебя. Что в этом для тебя главное?", "Понимаю. Расскажи немного подробнее, что тебя в этом волнует?"])
 
-# ---------- LLM с ретраями ----------
+# ---------- LLM с ретраями, семафором и подробным логом ошибок ----------
 async def llm_generate_talk(user_text: str, history_pairs: List[Tuple[str, str]]) -> Optional[str]:
     if settings.llm_provider == "none":
         return None
@@ -235,78 +184,81 @@ async def llm_generate_motivation(user_text: Optional[str]) -> Optional[str]:
 async def _call_llm(user_prompt: str, system_prompt: str) -> Optional[str]:
     attempts = 3
     backoff = 1.0
-    for i in range(attempts):
-        try:
-            timeout = settings.llm_timeout_s
-            if settings.llm_provider == "openai" and settings.openai_api_key:
-                headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
-                json_body = {
-                    "model": settings.openai_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 200,
-                }
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    r = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=json_body)
-                    if r.status_code in (429, 500, 502, 503, 504):
-                        raise httpx.HTTPStatusError("rate/5xx", request=r.request, response=r)
-                    r.raise_for_status()
-                    data = r.json()
-                    return data["choices"][0]["message"]["content"].strip()
+    async with _LLM_SEM:
+        for i in range(attempts):
+            try:
+                timeout = settings.llm_timeout_s
+                if settings.llm_provider == "openai" and settings.openai_api_key:
+                    headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+                    if settings.openai_org_id:
+                        headers["OpenAI-Organization"] = settings.openai_org_id
+                    json_body = {
+                        "model": settings.openai_model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 200,
+                    }
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        r = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=json_body)
+                        if r.status_code in (429, 500, 502, 503, 504):
+                            try:
+                                logging.warning(f"OpenAI error {r.status_code}: {r.text}")
+                            except Exception:
+                                pass
+                            raise httpx.HTTPStatusError("rate/5xx", request=r.request, response=r)
+                        r.raise_for_status()
+                        data = r.json()
+                        return data["choices"][0]["message"]["content"].strip()
 
-            if settings.llm_provider == "deepseek" and settings.deepseek_api_key:
-                headers = {"Authorization": f"Bearer {settings.deepseek_api_key}"}
-                json_body = {
-                    "model": settings.deepseek_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 200,
-                }
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    r = await client.post("https://api.deepseek.com/chat/completions", headers=headers, json=json_body)
-                    if r.status_code in (429, 500, 502, 503, 504):
-                        raise httpx.HTTPStatusError("rate/5xx", request=r.request, response=r)
-                    r.raise_for_status()
-                    data = r.json()
-                    return data["choices"][0]["message"]["content"].strip()
-            return None
-        except httpx.HTTPStatusError:
-            if i < attempts - 1:
-                await asyncio.sleep(backoff)
-                backoff *= 2
-                continue
-            return None
-        except Exception:
-            return None
-    return None
+                if settings.llm_provider == "deepseek" and settings.deepseek_api_key:
+                    headers = {"Authorization": f"Bearer {settings.deepseek_api_key}"}
+                    json_body = {
+                        "model": settings.deepseek_model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 200,
+                    }
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        r = await client.post("https://api.deepseek.com/chat/completions", headers=headers, json=json_body)
+                        if r.status_code in (429, 500, 502, 503, 504):
+                            try:
+                                logging.warning(f"DeepSeek error {r.status_code}: {r.text}")
+                            except Exception:
+                                pass
+                            raise httpx.HTTPStatusError("rate/5xx", request=r.request, response=r)
+                        r.raise_for_status()
+                        data = r.json()
+                        return data["choices"][0]["message"]["content"].strip()
+                return None
+            except httpx.HTTPStatusError:
+                if i < attempts - 1:
+                    await asyncio.sleep(backoff + random.uniform(0, 0.5))
+                    backoff *= 2
+                    continue
+                return None
+            except Exception as e:
+                logging.warning(f"LLM call failed: {e}")
+                return None
 
 # ---------- Публичные функции ----------
-async def generate_talk_reply(
-    user_text: str,
-    recent_history: List[Tuple[str, str]],
-    prev_user_text: Optional[str],
-    last_assistant_text: Optional[str]
-) -> str:
+async def generate_talk_reply(user_text: str, recent_history: List[Tuple[str, str]], prev_user_text: Optional[str], last_assistant_text: Optional[str]) -> str:
     llm = await llm_generate_talk(user_text, recent_history)
-    if llm:
-        return llm
+    if llm: return llm
     return talk_fallback(user_text, prev_user_text, last_assistant_text)
 
 async def generate_support_reply(user_text: str) -> str:
     sent = detect_sentiment(user_text)
     llm = await llm_generate_support(user_text)
-    if llm:
-        return llm
+    if llm: return llm
     return tmpl_support(sent)
 
 async def generate_motivation_reply(user_text: Optional[str]) -> str:
     llm = await llm_generate_motivation(user_text)
-    if llm:
-        return llm
+    if llm: return llm
     return tmpl_motivation()
