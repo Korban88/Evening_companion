@@ -1,4 +1,3 @@
-import asyncio
 import httpx
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple, Optional, Literal
@@ -6,8 +5,14 @@ from config import settings
 
 Sentiment = Literal["neg", "neu", "pos"]
 
-NEG_MARKERS = ["плохо", "устал", "устала", "тяжело", "тревога", "страх", "обидно", "не получилось", "кошмар", "сложно", "один", "одиноко", "больно", "упал", "упала"]
-POS_MARKERS = ["рад", "рада", "доволен", "довольна", "получилось", "успех", "кайф", "класс", "круто", "вышло", "продвинулся", "получилось"]
+NEG_MARKERS = [
+    "плохо","устал","устала","тяжело","тревога","страх","обидно","грусть",
+    "печаль","сложно","один","одиноко","болит","не могу","надоело","выгор"
+]
+POS_MARKERS = [
+    "рад","рада","доволен","довольна","получилось","успех","класс","круто",
+    "вышло","продвинулся","сделал","сделала"
+]
 
 def detect_sentiment(text: str) -> Sentiment:
     low = text.lower()
@@ -30,110 +35,118 @@ def time_of_day_msk() -> str:
         return "вечер"
     return "ночь"
 
-# ===== ТЕКСТОВЫЕ ШАБЛОНЫ =====
-
+# ---------- Поддержка ----------
 def tmpl_support(sent: Sentiment) -> str:
     tod = time_of_day_msk()
-    base_neg = [
-        "Твоим чувствам есть место. Ты не один.",
-        "Ты сделал достаточно на сегодня. Можно позволить себе выдохнуть.",
-        "Не обязательно тащить всё сразу. Шаг за шагом — нормально."
-    ]
-    base_neu = [
-        "Я рядом текстом, но по-настоящему. Береги себя.",
-        "Твоя усталость слышна. Дай себе немного тишины.",
-        "Спасибо, что делишься. Это уже забота о себе."
-    ]
-    base_pos = [
-        "Звучит тепло. Сохраним это ощущение.",
-        "Отлично, пусть это станет опорой на завтра.",
-        "Классный штрих к дню. Заметим и пойдем дальше."
-    ]
     if sent == "neg":
-        pool = base_neg
+        pool = [
+            "Слышу, что непросто. Ты не один.",
+            "Можно выдохнуть. Ты сделал достаточно на сегодня.",
+            "Не обязательно тянуть всё разом. Шаг за шагом — нормально."
+        ]
     elif sent == "pos":
-        pool = base_pos
+        pool = [
+            "Звучит по-тёплому. Сохраним это ощущение.",
+            "Классный момент. Пусть это станет опорой.",
+            "Радуюсь вместе с тобой."
+        ]
     else:
-        pool = base_neu
-    pick = pool[hash((sent, tod)) % len(pool)]
-    return f"{pick}"
+        pool = [
+            "Я рядом текстом, но по-настоящему.",
+            "Спасибо, что делишься. Это уже забота о себе.",
+            "Твоя усталость слышна. Дай себе немного тишины."
+        ]
+    return pool[hash((sent, tod)) % len(pool)]
 
+# ---------- Мотивация ----------
 def tmpl_motivation() -> str:
     tod = time_of_day_msk()
     lines = {
         "утро": [
             "Один простой шаг сейчас задаст тон дню.",
-            "Не ищи идеальных условий — начни с малого."
+            "Не жди идеальных условий — начни маленьким действием."
         ],
         "день": [
-            "Сделай короткое действие за 5 минут — оно двинет остальное.",
-            "Фокус на одном. Остальное подождёт."
+            "Выбери одно короткое действие на 5 минут.",
+            "Фокус на одном деле — остальное подождёт."
         ],
         "вечер": [
-            "Подведи маленький итог и выбери один шаг на завтра.",
-            "Сегодня было достаточно. Завтра — продолжишь с маленького шага."
+            "Подведи маленький итог и дай себе отдых.",
+            "Сегодня было достаточно. Остальное — позже."
         ],
         "ночь": [
-            "Сохрани одну мысль на завтра и дай себе отдохнуть.",
-            "Лучшее действие сейчас — забота о себе и сон."
+            "Сохрани одну мысль и попробуй отдохнуть.",
+            "Лучшее действие сейчас — забота о себе."
         ]
     }
     pool = lines.get(tod, lines["день"])
     return pool[hash(("m", tod)) % len(pool)]
 
-def tmpl_talk_reflect(user_text: str, sent: Sentiment) -> str:
-    t = " ".join(user_text.strip().split())
-    if len(t) > 180:
-        t = t[:180] + "…"
-    pre = {
-        "neg": "Слышу в этом напряжение. ",
-        "neu": "",
-        "pos": "Звучит светло. "
-    }[sent]
-    return f"{pre}Ты написал: «{t}». Что из этого стоит взять с собой на завтра?"
+# ---------- Беседа: живая fallback-логика ----------
+def _detect_topic(text: str) -> str:
+    t = text.lower()
+    if any(w in t for w in ["привет","здрав","добрый","ку","hi","hello"]):
+        return "greet"
+    if any(w in t for w in ["устал","устала","выгор","не могу","надоело"]):
+        return "tired"
+    if any(w in t for w in ["посор","конфликт","отношен","друг","парн","девуш","семь","муж","жена"]):
+        return "relations"
+    if any(w in t for w in ["работ","началь","проект","срок","отчёт","учёб","экзам"]):
+        return "work"
+    if any(w in t for w in ["болит","боль","здоров","сон","бессон","тревог"]):
+        return "health"
+    if len(t.strip()) <= 8:
+        return "short"
+    return "generic"
 
-# ===== ХРАНЕНИЕ КОРОТКОЙ ИСТОРИИ В ПАМЯТИ (в БД хранит основной дневник; историю для LLM передаем как контекст) =====
-# История хранится/получается в main.py из таблицы diary. Здесь только форматирование
-def format_history_for_llm(history: List[Tuple[str, str]]) -> str:
-    # history: [(role, text)] с role in {"user","assistant"}
-    parts = []
-    for role, text in history[-settings.history_max_msgs:]:
-        tag = "Пользователь" if role == "user" else "Ассистент"
-        parts.append(f"{tag}: {text}")
-    return "\n".join(parts)
+def talk_fallback(user_text: str) -> str:
+    sent = detect_sentiment(user_text)
+    topic = _detect_topic(user_text)
+    if topic == "greet":
+        return "Привет. Как тебе этот день?"
+    if topic == "short":
+        return "Я здесь. Расскажи, что у тебя на душе."
+    if topic == "tired":
+        return "Слышу усталость. Что сильнее всего выматывает тебя сейчас?"
+    if topic == "relations":
+        return "Отношения — это важно. Что именно задело больше всего в этой ситуации?"
+    if topic == "work":
+        return "Рабочие дела могут давить. Что сейчас основная трудность для тебя?"
+    if topic == "health":
+        return "Тело и сон многое решают. Как ты себя чувствуешь прямо сейчас?"
+    if sent == "neg":
+        return "Понимаю, что непросто. Что в этом для тебя самое тяжёлое?"
+    if sent == "pos":
+        return "Звучит радостно. Что особенно порадовало тебя в этом?"
+    return "Слышу тебя. Расскажи немного больше: что в этом для тебя главное?"
 
-# ===== LLM ВЫЗОВ =====
-
+# ---------- Вызов LLM ----------
 async def llm_generate_talk(user_text: str, history_pairs: List[Tuple[str, str]]) -> Optional[str]:
     if settings.llm_provider == "none":
         return None
     sys_prompt = (
-        "Ты тёплый, спокойный собеседник. Коротко отражай мысль пользователя, задавай 1 мягкий уточняющий вопрос. "
-        "Не давай советов, если не просили. Без эмодзи."
+        "Ты тёплый, спокойный собеседник. Веди естественный диалог на уровне друга: короткое отражение мысли "
+        "и уместный уточняющий вопрос по теме. Без советов, если их не просили. Без планов на завтра. Без эмодзи."
     )
+    ctx = "\n".join([f"{'Пользователь' if r=='user' else 'Ассистент'}: {t}" for r, t in history_pairs[-settings.history_max_msgs:]])
     user_prompt = (
-        f"Контекст последних сообщений:\n{format_history_for_llm(history_pairs)}\n\n"
+        f"Контекст последних сообщений:\n{ctx}\n\n"
         f"Текущее сообщение пользователя: {user_text}\n\n"
-        "Ответь одной-двумя фразами: короткое отражение + один мягкий вопрос."
+        "Ответь 1–2 фразами: короткое эмпатичное отражение + уместный вопрос. Не давай советов, не упоминай «завтра»."
     )
     return await _call_llm(user_prompt, sys_prompt)
 
 async def llm_generate_support(user_text: str) -> Optional[str]:
     if settings.llm_provider == "none":
         return None
-    sys_prompt = (
-        "Ты поддерживающий ассистент. Дай 1-2 короткие фразы принятия и утешения. "
-        "Без советов, без оценок, без пафоса. Без эмодзи."
-    )
+    sys_prompt = "Ты поддерживающий ассистент. Дай 1–2 короткие фразы принятия и утешения. Без советов. Без эмодзи."
     user_prompt = f"Пользователь пишет: {user_text}\nСформулируй 1–2 строки поддержки."
     return await _call_llm(user_prompt, sys_prompt)
 
 async def llm_generate_motivation(user_text: Optional[str]) -> Optional[str]:
     if settings.llm_provider == "none":
         return None
-    sys_prompt = (
-        "Ты мотивирующий ассистент. Дай одну короткую реалистичную фразу-подсказку к действию на сегодня. Без пафоса. Без эмодзи."
-    )
+    sys_prompt = "Ты мотивирующий ассистент. Дай одну короткую реалистичную фразу-подсказку к действию на сегодня. Без пафоса. Без эмодзи."
     user_prompt = f"Контекст: {user_text or 'нет'}"
     return await _call_llm(user_prompt, sys_prompt)
 
@@ -177,16 +190,12 @@ async def _call_llm(user_prompt: str, system_prompt: str) -> Optional[str]:
         return None
     return None
 
-# ===== ПУБЛИЧНЫЕ ФУНКЦИИ ДЛЯ main.py =====
-
+# ---------- Публичные функции ----------
 async def generate_talk_reply(user_text: str, recent_history: List[Tuple[str, str]]) -> str:
-    sent = detect_sentiment(user_text)
-    # попытка LLM
     llm = await llm_generate_talk(user_text, recent_history)
     if llm:
         return llm
-    # fallback
-    return tmpl_talk_reflect(user_text, sent)
+    return talk_fallback(user_text)
 
 async def generate_support_reply(user_text: str) -> str:
     sent = detect_sentiment(user_text)
